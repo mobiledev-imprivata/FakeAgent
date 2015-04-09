@@ -9,10 +9,14 @@
 import UIKit
 
 class ViewController: UIViewController {
-
+    
+    private var bluetoothManager: BluetoothManager!
+    
     override func viewDidLoad() {
         super.viewDidLoad()
         // Do any additional setup after loading the view, typically from a nib.
+        
+        bluetoothManager = BluetoothManager()
     }
 
     override func didReceiveMemoryWarning() {
@@ -22,11 +26,11 @@ class ViewController: UIViewController {
 
 
     @IBAction func enroll(sender: AnyObject) {
-        println("enroll")
+        bluetoothManager.enroll()
     }
     
     @IBAction func auth(sender: AnyObject) {
-        println("auth")
+        bluetoothManager.auth()
     }
     
 }
