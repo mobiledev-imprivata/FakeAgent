@@ -19,9 +19,9 @@ class BluetoothManager: NSObject {
         
         var description: String {
             switch self {
-            case .Enroll1: return "Enroll1"
-            case .Enroll2: return "Enroll2"
-            case .Enroll3: return "Enroll3"
+            case .Enroll1: return "Enroll 1"
+            case .Enroll2: return "Enroll 2"
+            case .Enroll3: return "Enroll 3"
             case .Auth: return "Auth"
             }
         }
@@ -35,21 +35,27 @@ class BluetoothManager: NSObject {
     private let authInputCharacteristicUUID    = CBUUID(string: "E11C666D-A68C-4775-A05E-2765830D5D60")
     private let authOutputCharacteristicUUID   = CBUUID(string: "BEDFA15A-9048-4ABD-8455-6E164F4878E3")
     
-    private var currentServiceUUID: CBUUID!
-    
     private var centralManager: CBCentralManager!
     private var peripheral: CBPeripheral!
-    var responseCharacteristic: CBCharacteristic!
+    
+    var enrollInputCharacteristic: CBCharacteristic!
+    var enrollOutputCharacteristic: CBCharacteristic!
+    var authInputCharacteristic: CBCharacteristic!
+    var authOutputCharacteristic: CBCharacteristic!
     
     private var isPoweredOn = false
     private var scanTimer: NSTimer!
-    private let timeoutInSecs = 5.0
+    private let timeoutInSecs = 3.0
     
     private var isBusy = false
     
     private var pendingRequest: String!
     
-    private var state: State!
+    private var state: State = .Enroll1 {
+        didSet {
+            log("state changed to \(state.description)")
+        }
+    }
     
     override init() {
         super.init()
@@ -79,7 +85,7 @@ class BluetoothManager: NSObject {
             return
         }
         isBusy = true
-        currentServiceUUID = enrollServiceUUID
+        state = .Enroll1
         startScanForPeripheralWithService(enrollServiceUUID)
     }
     
@@ -94,22 +100,45 @@ class BluetoothManager: NSObject {
             return
         }
         isBusy = true
-        currentServiceUUID = authServiceUUID
+        state = .Auth
         startScanForPeripheralWithService(authServiceUUID)
     }
     
-    private func sendRequest(request: String) {
-        log("sendCommand")
-        startScanForPeripheralWithService(currentServiceUUID)
+    private func sendRequest() {
+        let request = "\(state.description) request"
+        log("sendRequest in state \(state.description): \(request)")
+        let data = request.dataUsingEncoding(NSUTF8StringEncoding)
+        peripheral.writeValue(data, forCharacteristic: state == .Auth ? authInputCharacteristic : enrollInputCharacteristic, type: CBCharacteristicWriteType.WithResponse)
     }
     
     private func processResponse(responseData: NSData) {
-        
+        let response = NSString(data: responseData, encoding: NSUTF8StringEncoding)!
+        log("processResponse in state \(state.description): \(response)")
+        switch state {
+        case .Enroll1:
+            state = .Enroll2
+            sendRequest()
+        case .Enroll2:
+            state = .Enroll3
+            sendRequest()
+        case .Enroll3:
+            state = .Auth
+            dispatch_async(dispatch_get_main_queue()) {
+                self.startScanForPeripheralWithService(self.authServiceUUID)
+            }
+        case .Auth:
+            disconnect()
+        }
     }
     
     private func startScanForPeripheralWithService(uuid: CBUUID) {
         log("startScanForPeripheralWithService \(nameFromUUID(uuid)) \(uuid)")
         centralManager.stopScan()
+        peripheral = nil
+        enrollInputCharacteristic = nil
+        enrollOutputCharacteristic = nil
+        authInputCharacteristic = nil
+        authOutputCharacteristic = nil
         scanTimer = NSTimer.scheduledTimerWithTimeInterval(timeoutInSecs, target: self, selector: Selector("timeout"), userInfo: nil, repeats: false)
         centralManager.scanForPeripheralsWithServices([uuid], options: nil)
     }
@@ -124,8 +153,11 @@ class BluetoothManager: NSObject {
     private func disconnect() {
         log("disconnect")
         centralManager.cancelPeripheralConnection(peripheral)
-        self.peripheral = nil
-        self.responseCharacteristic = nil
+        peripheral = nil
+        enrollInputCharacteristic = nil
+        enrollOutputCharacteristic = nil
+        authInputCharacteristic = nil
+        authOutputCharacteristic = nil
         isBusy = false
     }
     
@@ -169,7 +201,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
     func centralManager(central: CBCentralManager!, didConnectPeripheral peripheral: CBPeripheral!) {
         log("centralManager didConnectPeripheral")
         self.peripheral.delegate = self
-        peripheral.discoverServices([currentServiceUUID])
+        peripheral.discoverServices(state == .Auth ? [authServiceUUID] : [enrollServiceUUID])
     }
     
 }
@@ -204,20 +236,26 @@ extension BluetoothManager: CBPeripheralDelegate {
         for characteristic in service.characteristics {
             let name = nameFromUUID(characteristic.UUID)
             log("characteristic \(name) \(characteristic.UUID)")
-//            if characteristic.UUID == enrollInputCharacteristicUUID {
-//                let data = "Hello, World!".dataUsingEncoding(NSUTF8StringEncoding)
-//                peripheral.writeValue(data, forCharacteristic: characteristic as! CBCharacteristic, type: CBCharacteristicWriteType.WithResponse)
-//            } else if characteristic.UUID == responseCharacteristicUUID {
-//                responseCharacteristic = characteristic as CBCharacteristic
-//            }
+            switch characteristic.UUID {
+            case enrollInputCharacteristicUUID:
+                enrollInputCharacteristic = characteristic as! CBCharacteristic
+            case enrollOutputCharacteristicUUID:
+                enrollOutputCharacteristic = characteristic as! CBCharacteristic
+            case authInputCharacteristicUUID:
+                authInputCharacteristic = characteristic as! CBCharacteristic
+            case authOutputCharacteristicUUID:
+                authOutputCharacteristic = characteristic as! CBCharacteristic
+            default:
+                break
+            }
         }
-        disconnect()
+        sendRequest()
     }
     
     func peripheral(peripheral: CBPeripheral!, didWriteValueForCharacteristic characteristic: CBCharacteristic!, error: NSError!) {
         if error == nil {
             log("peripheral didWriteValueForCharacteristic ok")
-            peripheral.readValueForCharacteristic(responseCharacteristic)
+            peripheral.readValueForCharacteristic(state == .Auth ? authOutputCharacteristic : enrollOutputCharacteristic)
         } else {
             log("peripheral didWriteValueForCharacteristic error \(error.localizedDescription)")
         }
@@ -227,8 +265,7 @@ extension BluetoothManager: CBPeripheralDelegate {
         if error == nil {
             let name = nameFromUUID(characteristic.UUID)
             log("peripheral didUpdateValueForCharacteristic \(name) ok")
-            let value: String = NSString(data: characteristic.value, encoding: NSUTF8StringEncoding)! as String
-            log("received response: \(value)")
+            processResponse(characteristic.value)
         } else {
             log("peripheral didUpdateValueForCharacteristic error \(error.localizedDescription)")
             return
